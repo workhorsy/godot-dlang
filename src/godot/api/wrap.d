@@ -16,6 +16,11 @@ import godot.api.traits, godot.api.script;
 import godot, godot.abi;
 import godot.node;
 
+public void delegate(Throwable err) on_unhandled_exception = delegate(Throwable err) {
+    import std.stdio : stderr;
+    stderr.writeln(err);
+};
+
 private template staticCount(alias thing, seq...) {
     template staticCountNum(size_t soFar, seq...) {
         enum size_t nextPos = staticIndexOf!(thing, seq);
@@ -337,22 +342,30 @@ package(godot) struct MethodWrapper(T, alias mf) {
         alias argIota = aliasSeqOf!(iota(A.length));
         alias argCall = staticMap!(ArgCall, argIota);
 
-        static if (is(R == void)) {
-            mixin("obj." ~ name ~ "(argCall);");
-        } else {
-            // allow Variant to be returned as is, i.e. no wrapping
-            static if (is(R == Variant)) {
-                mixin("v = obj." ~ name ~ "(argCall);");
-            }
-            else {
-                mixin("v = Variant(obj." ~ name ~ "(argCall));");
-            }
+        try {
+            static if (is(R == void)) {
+                mixin("obj." ~ name ~ "(argCall);");
+            } else {
+                // allow Variant to be returned as is, i.e. no wrapping
+                static if (is(R == Variant)) {
+                    mixin("v = obj." ~ name ~ "(argCall);");
+                }
+                else {
+                    mixin("v = Variant(obj." ~ name ~ "(argCall));");
+                }
 
-            if (r_return && v._godot_variant._opaque.ptr) {
-                //*cast(godot_variant*) r_return = vd;   // since alpha 12 instead of this now have to copy it
-                _godot_api.variant_new_copy(r_return, &v._godot_variant); // since alpha 12 this is now the case
+                if (r_return && v._godot_variant._opaque.ptr) {
+                    //*cast(godot_variant*) r_return = vd;   // since alpha 12 instead of this now have to copy it
+                    _godot_api.variant_new_copy(r_return, &v._godot_variant); // since alpha 12 this is now the case
+                }
+            }
+        // Handle unhandled exception
+        } catch (Throwable err) {
+            if (on_unhandled_exception) {
+                on_unhandled_exception(err);
             }
         }
+
         //return vd;
     }
 
@@ -375,10 +388,17 @@ package(godot) struct MethodWrapper(T, alias mf) {
         alias argIota = aliasSeqOf!(iota(A.length));
         alias argCall = staticMap!(ArgCall, argIota);
 
-        static if (is(R == void)) {
-            mixin("obj." ~ name ~ "(argCall);");
-        } else {
-            mixin("*(cast(R*) r_return) = obj." ~ name ~ "(argCall);");
+        try {
+            static if (is(R == void)) {
+                mixin("obj." ~ name ~ "(argCall);");
+            } else {
+                mixin("*(cast(R*) r_return) = obj." ~ name ~ "(argCall);");
+            }
+		// Handle unhandled exception
+        } catch (Throwable err) {
+            if (on_unhandled_exception) {
+                on_unhandled_exception(err);
+            }
         }
     }
 
@@ -595,30 +615,37 @@ package(godot) struct OnReadyWrapper(T, alias mf) if (is(GodotClass!T : Node)) {
                         alias result = A; // final fallback: pass it unmodified to assignment
                 }
 
-            // Second, assign `result` to the field depending on the types of it and `result`
-            static if (!is(result == void)) {
-                import godot.resource;
+            try {
+                // Second, assign `result` to the field depending on the types of it and `result`
+                static if (!is(result == void)) {
+                    import godot.resource;
 
-                static if (isImplicitlyConvertible!(typeof(result), F)) {
-                    // direct assignment
-                    mixin("t." ~ n) = result;
-                } else static if (__traits(compiles, mixin("t." ~ n) = F(result))) {
-                    // explicit constructor (String(string), NodePath(string), etc)
-                    mixin("t." ~ n) = F(result);
-                } else static if (isGodotClass!F && extends!(F, Node)) {
-                    // special case: node path
-                    auto np = NodePath(result);
-                    mixin("t." ~ n) = cast(F) t.owner.getNode(np);
-                } else static if (isGodotClass!F && extends!(F, Resource)) {
-                    // special case: resource load path
-                    import godot.resourceloader;
+                    static if (isImplicitlyConvertible!(typeof(result), F)) {
+                        // direct assignment
+                        mixin("t." ~ n) = result;
+                    } else static if (__traits(compiles, mixin("t." ~ n) = F(result))) {
+                        // explicit constructor (String(string), NodePath(string), etc)
+                        mixin("t." ~ n) = F(result);
+                    } else static if (isGodotClass!F && extends!(F, Node)) {
+                        // special case: node path
+                        auto np = NodePath(result);
+                        mixin("t." ~ n) = cast(F) t.owner.getNode(np);
+                    } else static if (isGodotClass!F && extends!(F, Resource)) {
+                        // special case: resource load path
+                        import godot.resourceloader;
 
-                    mixin("t." ~ n) = cast(F) ResourceLoader.load(result);
-                } else
-                    static assert(0, "Don't know how to assign " ~ typeof(result)
-                            .stringof ~ " " ~ result.stringof ~
-                            " to " ~ F.stringof ~ " " ~ fullyQualifiedName!(
-                                mixin("t." ~ n)));
+                        mixin("t." ~ n) = cast(F) ResourceLoader.load(result);
+                    } else
+                        static assert(0, "Don't know how to assign " ~ typeof(result)
+                                .stringof ~ " " ~ result.stringof ~
+                                " to " ~ F.stringof ~ " " ~ fullyQualifiedName!(
+                                    mixin("t." ~ n)));
+                }
+            // Handle unhandled exception
+            } catch (Throwable err) {
+                if (on_unhandled_exception) {
+                    on_unhandled_exception(err);
+                }
             }
         }
 
@@ -671,7 +698,14 @@ package(godot) struct VariableWrapper(T, alias var) {
             return;
         }
         Variant* v = cast(Variant*) r_return;
-        *v = Variant(mixin("obj." ~ __traits(identifier, var)));
+        try {
+            *v = Variant(mixin("obj." ~ __traits(identifier, var)));
+        // Handle unhandled exception
+        } catch (Throwable err) {
+            if (on_unhandled_exception) {
+                on_unhandled_exception(err);
+            }
+        }
     }
 
     extern (C) // for calling convention
@@ -687,7 +721,14 @@ package(godot) struct VariableWrapper(T, alias var) {
             return;
         }
         Variant* v = cast(Variant*) args[0];
-        mixin("obj." ~ __traits(identifier, var)) = v.as!P;
+        try {
+            mixin("obj." ~ __traits(identifier, var)) = v.as!P;
+        // Handle unhandled exception
+        } catch (Throwable err) {
+            if (on_unhandled_exception) {
+                on_unhandled_exception(err);
+            }
+        }
     }
 }
 
